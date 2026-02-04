@@ -1,6 +1,7 @@
 substitutions:
   name: esphome-web-0bac48
   friendly_name: "Xiaozhi Ball V2"
+  ha_base_url: "http://server.local:8123"
 
   # === Vorwissen: HA / Music Assistant Entities ===
   ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
@@ -227,6 +228,15 @@ touchscreen:
             const int x = touch.x;
             const int y = touch.y;
             ESP_LOGD("touch", "x=%d y=%d mode=%d", x, y, id(ui_mode));
+            id(last_touch_ms) = millis();
+            if (id(cover_mode_active)) {
+              id(cover_mode_active) = false;
+              id(backlight_full).execute();
+              id(draw_display).execute();
+              id(touch_consumed) = true;
+              id(touch_start_ms) = millis();
+              return;
+            }
 
             // ====== PLAYLIST PAGE (ui_mode=2) ======
             // Layout laut Vorwissen:
@@ -287,14 +297,15 @@ touchscreen:
             // Touch unten: Wechsel zur Playlist Page
             if (id(ui_mode) == 1) {
               // Volume zones (top left / top right)
-              if (y < 30) {
-                if (x < 60) {
+              int vol_zone_h = id(volume_overlay_visible) ? 70 : 60;
+              if (y < vol_zone_h) {
+                if (x < 120) {
                   id(volume_down).execute();
                   id(show_volume_overlay).execute();
                   id(touch_consumed) = true;
                   id(touch_start_ms) = millis();
                   return;
-                } else if (x > 180) {
+                } else {
                   id(volume_up).execute();
                   id(show_volume_overlay).execute();
                   id(touch_consumed) = true;
@@ -374,6 +385,8 @@ binary_sensor:
     id: music_playing
     lambda: |-
       return id(music_state).state == "playing";
+    on_state:
+      - script.execute: draw_display
 
   - platform: gpio
     pin:
@@ -789,14 +802,33 @@ script:
       - lambda: id(volume_overlay_visible) = false;
       - script.execute: draw_display
 
+  - id: backlight_dim
+    then:
+      - light.turn_on:
+          id: Sled
+          brightness: 30%
+
+  - id: backlight_full
+    then:
+      - light.turn_on:
+          id: Sled
+          brightness: 100%
+
   - id: draw_display
     then:
       - if:
           condition:
             lambda: return id(ui_mode) == 1;
           then:
-            - display.page.show: music_page
-            - component.update: s3_box_lcd
+            - if:
+                condition:
+                  lambda: return id(cover_mode_active);
+                then:
+                  - display.page.show: cover_page
+                  - component.update: s3_box_lcd
+                else:
+                  - display.page.show: music_page
+                  - component.update: s3_box_lcd
           else:
             - if:
                 condition:
@@ -1207,6 +1239,14 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  - id: last_touch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: cover_mode_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
   # ui_mode: 0=Voice, 1=Music, 2=Playlists
   - id: ui_mode
@@ -1310,6 +1350,23 @@ image:
     type: RGB565
     transparency: alpha_channel
 
+http_request:
+  useragent: esphome/ha_esp32s3_ball
+  timeout: 10s
+
+online_image:
+  - id: cover_image
+    url: "https://via.placeholder.com/240.jpg"
+    format: JPEG
+    type: RGB565
+    resize: ${imagewidth}x${imageheight}
+    update_interval: 5min
+
+deep_sleep:
+  id: deep_sleep_1
+  wakeup_pin: GPIO${touch_input_pin}
+  wakeup_pin_mode: INVERT_WAKEUP
+
 font:
   - file:
       type: gfonts
@@ -1386,6 +1443,21 @@ text_sensor:
     on_value:
       - script.execute: draw_display
 
+  - platform: homeassistant
+    id: ha_cover_url
+    entity_id: ${ha_player}
+    attribute: entity_picture
+    on_value:
+      - lambda: |-
+          if (id(ha_cover_url).state.empty()) return;
+          std::string url = id(ha_cover_url).state;
+          if (!url.empty() && url[0] == '/') {
+            url = std::string("${ha_base_url}") + url;
+          }
+          id(cover_image).set_url(url);
+          id(cover_image).update();
+      - script.execute: draw_display
+
   - id: text_request
     platform: template
     on_value:
@@ -1405,6 +1477,14 @@ text_sensor:
           std::string truncated = esphome::str_truncate(name.c_str(),31);
           id(text_response).state = (truncated+"...").c_str();
         }
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: draw_display
 
 interval:
   - interval: 30ms
@@ -1449,7 +1529,33 @@ interval:
             id(playlist_scroll_anim_v) = 0.0f;
             id(draw_display).execute();
           } else {
-            id(playlist_scroll_anim_v) = v;
+          id(playlist_scroll_anim_v) = v;
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          uint32_t now_ms = millis();
+          if (id(cover_mode_active)) {
+            if (id(ui_mode) != 1 || !id(music_playing).state) {
+              id(cover_mode_active) = false;
+              id(backlight_full).execute();
+              id(draw_display).execute();
+            }
+            return;
+          }
+          if (!id(music_playing).state) {
+            if ((now_ms - id(last_touch_ms)) >= 60000) {
+              id(deep_sleep_1).enter();
+            }
+            return;
+          }
+          if (id(ui_mode) == 1 && id(music_playing).state) {
+            if ((now_ms - id(last_touch_ms)) >= 60000) {
+              id(cover_mode_active) = true;
+              id(backlight_dim).execute();
+              id(draw_display).execute();
+            }
+          }
           }
 
 color:
@@ -1576,30 +1682,49 @@ display:
           id(draw_active_timer_widget).execute();
 
       # ==========================
+      # COVER PAGE (idle, ui_mode=1)
+      # ==========================
+      - id: cover_page
+        lambda: |-
+          it.fill(Color::BLACK);
+          it.image((it.get_width() / 2), (it.get_height() / 2), id(cover_image), ImageAlign::CENTER);
+
+      # ==========================
       # MUSIC PAGE (ui_mode=1)
       # ==========================
       - id: music_page
         lambda: |-
           it.fill(Color::BLACK);
 
-          // Volume indicator (small, top center) + +/- icons
+          // Volume indicators (inside round display area)
+          if (id(volume_overlay_visible)) {
+            it.printf(60, 6, id(font_timer), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, 6, id(font_timer), id(ui_gray), TextAlign::CENTER, "+");
+          } else {
+            it.printf(60, 8, id(font_response), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, 8, id(font_response), id(ui_gray), TextAlign::CENTER, "+");
+          }
           if (!isnan(id(ha_volume_level).state)) {
             int vol_pct = (int)roundf(id(ha_volume_level).state * 100.0f);
-            it.printf(120, 2, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "Vol %d%%", vol_pct);
+            it.printf(120, 10, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "%d%%", vol_pct);
             if (id(volume_overlay_visible)) {
-              it.printf(120, 12, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+              it.printf(120, 14, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             }
           }
-          it.printf(10, 2, id(font_response), id(ui_gray), TextAlign::TOP_LEFT, "-");
-          it.printf(230, 2, id(font_response), id(ui_gray), TextAlign::TOP_RIGHT, "+");
 
           // Title
-          it.printf(120, 20, id(font_response), Color::WHITE, TextAlign::TOP_CENTER, "%s",
+          it.printf(120, 36, id(font_response), Color::WHITE, TextAlign::TOP_CENTER, "%s",
                     id(music_title).state.c_str());
 
           // Artist
-          it.printf(120, 45, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "%s",
+          it.printf(120, 58, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "%s",
                     id(music_artist).state.c_str());
+
+          // Time (bottom center, as low as possible)
+          auto now = id(ha_time).now();
+          if (now.is_valid()) {
+            it.strftime(120, 238, id(font_request), id(ui_gray), TextAlign::BOTTOM_CENTER, "%H:%M", now);
+          }
 
           // Separators
           it.line(0, 85, 240, 85, id(ui_darkgray));
@@ -1607,26 +1732,29 @@ display:
 
           // Control zones (Prev / PlayPause / Next)
           it.filled_rectangle(0, 90, 80, 60, Color::BLACK);
-          it.rectangle(0, 90, 80, 60, id(ui_darkgray));
 
           it.filled_rectangle(80, 90, 80, 60, Color::BLACK);
-          it.rectangle(80, 90, 80, 60, id(ui_green));
+          it.rectangle(80, 90, 80, 60, id(ui_darkgray));
 
           it.filled_rectangle(160, 90, 80, 60, Color::BLACK);
-          it.rectangle(160, 90, 80, 60, id(ui_darkgray));
 
-          it.line(80, 90, 80, 150, id(ui_darkgray));
-          it.line(160, 90, 160, 150, id(ui_darkgray));
 
           it.printf(40, 120, id(font_timer), Color::WHITE, TextAlign::CENTER, "<<");
-          it.printf(120, 120, id(font_timer), Color::WHITE, TextAlign::CENTER,
-                    id(music_playing).state ? "PAUSE" : "PLAY");
+          if (id(music_playing).state) {
+            // Pause symbol (two bars)
+            it.filled_rectangle(110, 108, 8, 24, Color::WHITE);
+            it.filled_rectangle(122, 108, 8, 24, Color::WHITE);
+          } else {
+            // Play symbol (triangle)
+            it.filled_triangle(112, 108, 112, 132, 130, 120, Color::WHITE);
+          }
           it.printf(200, 120, id(font_timer), Color::WHITE, TextAlign::CENTER, ">>");
 
-          // Playlist selector box (touch -> ui_mode=2)
-          it.filled_rectangle(20, 175, 200, 40, Color::BLACK);
-          it.rectangle(20, 175, 200, 40, Color::WHITE);
-
+          // Playlist selector (touch -> ui_mode=2)
+          it.line(30, 178, 210, 178, Color::WHITE);
+          it.line(30, 179, 210, 179, Color::WHITE);
+          it.line(30, 210, 210, 210, Color::WHITE);
+          it.line(30, 211, 210, 211, Color::WHITE);
           it.printf(120, 185, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%s",
                     id(playlist_selected).state.c_str());
 
