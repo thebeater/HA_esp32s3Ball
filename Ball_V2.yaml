@@ -3,8 +3,7 @@ substitutions:
   friendly_name: "Xiaozhi Ball V2"
 
   # === Vorwissen: HA / Music Assistant Entities ===
-  ha_player: "media_player.sonos_roam_airplay"          # Transport controls (Prev/Play/Next)
-  ma_player: "media_player.music_assistant_ball"        # Playlist playback target (Music Assistant)
+  ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
   playlist_selector: "input_select.ball_spotify_playlist"
   playlist_json_sensor: "sensor.music_assistant_playlists_json"
 
@@ -207,6 +206,13 @@ sensor:
               id(draw_display).execute();
             }
 
+  - platform: homeassistant
+    id: ha_volume_level
+    entity_id: ${ha_player}
+    attribute: volume_level
+    on_value:
+      - script.execute: draw_display
+
 touchscreen:
   - platform: cst816
     i2c_id: bus_b
@@ -225,21 +231,54 @@ touchscreen:
             // ====== PLAYLIST PAGE (ui_mode=2) ======
             // Layout laut Vorwissen:
             // Header "Playlists" + Line, danach Liste.
-            // List start y=45, row height=35, max 6.
+            // List start y=40, row height=35, max 6.
             if (id(ui_mode) == 2) {
               const int list_start_y = 40;
               const int row_h = 35;
-              int index = (y - list_start_y) / row_h;
+              const int visible_rows = 6;
+              const int visible_h = row_h * visible_rows;
+              const int up_zone_h = 28;
+              const int down_zone_h = 28;
 
-              // Nur sinnvolle Treffer akzeptieren
-              if (index >= 0 && index < 6) {
-                id(selected_playlist_index) = index;
-                id(start_selected_playlist).execute();
-
-                // Zurück zur Music Page (wie im Vorwissen)
-                id(ui_mode) = 1;
-                id(draw_display).execute();
+              // Up/Down zones (five rows step)
+              if (y < (list_start_y + up_zone_h)) {
+                int target = id(playlist_scroll_px) - (row_h * 5);
+                if (target < 0) target = 0;
+                id(playlist_scroll_target) = target;
+                id(playlist_scroll_anim_active) = true;
+                id(playlist_scroll_anim_last_ms) = millis();
+                id(playlist_scroll_anim_v) = (float)(id(playlist_scroll_target) - id(playlist_scroll_px)) * 0.10f;
+                id(touch_consumed) = true;
+                id(touch_start_ms) = millis();
+                ESP_LOGD("touch", "playlist up zone -> target=%d", id(playlist_scroll_target));
+                return;
               }
+              if (y > (list_start_y + visible_h - down_zone_h)) {
+                int target = id(playlist_scroll_px) + (row_h * 5);
+                if (target > id(playlist_max_scroll_px)) target = id(playlist_max_scroll_px);
+                id(playlist_scroll_target) = target;
+                id(playlist_scroll_anim_active) = true;
+                id(playlist_scroll_anim_last_ms) = millis();
+                id(playlist_scroll_anim_v) = (float)(id(playlist_scroll_target) - id(playlist_scroll_px)) * 0.10f;
+                id(touch_consumed) = true;
+                id(touch_start_ms) = millis();
+                ESP_LOGD("touch", "playlist down zone -> target=%d", id(playlist_scroll_target));
+                return;
+              }
+
+              // Tap on list item -> select
+              if (y >= list_start_y && y <= (list_start_y + visible_h)) {
+                int relative_y = (y - list_start_y) + id(playlist_scroll_px);
+                int index = relative_y / row_h;
+                if (relative_y >= 0 && index >= 0 && index < id(playlist_total_items)) {
+                  id(selected_playlist_index) = index;
+                  id(start_selected_playlist).execute();
+                  id(playlist_tap_valid) = true;
+                }
+              }
+              id(touch_consumed) = true;
+              id(touch_start_ms) = millis();
+              ESP_LOGD("touch", "playlist page touch consumed=1, start_ms=%lu", id(touch_start_ms));
               return;
             }
 
@@ -247,6 +286,23 @@ touchscreen:
             // Touch oben/mitte: Prev/Play/Next
             // Touch unten: Wechsel zur Playlist Page
             if (id(ui_mode) == 1) {
+              // Volume zones (top left / top right)
+              if (y < 30) {
+                if (x < 60) {
+                  id(volume_down).execute();
+                  id(show_volume_overlay).execute();
+                  id(touch_consumed) = true;
+                  id(touch_start_ms) = millis();
+                  return;
+                } else if (x > 180) {
+                  id(volume_up).execute();
+                  id(show_volume_overlay).execute();
+                  id(touch_consumed) = true;
+                  id(touch_start_ms) = millis();
+                  return;
+                }
+              }
+
               // Controls Bereich: y ~ 90..150
               if (y > 90 && y < 150) {
                 if (x < 80) {
@@ -261,22 +317,37 @@ touchscreen:
               // Playlist Box unten: y > 170
               if (y > 170) {
                 id(ui_mode) = 2;
+                ESP_LOGD("touch", "music->playlist tap x=%d y=%d -> ui_mode=%d", x, y, id(ui_mode));
                 id(draw_display).execute();
+                id(touch_consumed) = true;
+                id(touch_start_ms) = millis();
+                ESP_LOGD("touch", "music->playlist consumed=1, start_ms=%lu", id(touch_start_ms));
                 return;
               }
             }
 
             // Long-press Messung (für ui_mode toggle)
             id(touch_start_ms) = millis();
+            ESP_LOGD("touch", "touch start_ms=%lu (no consume)", id(touch_start_ms));
 
     on_release:
       then:
         - lambda: |-
-            uint32_t duration = millis() - id(touch_start_ms);
-            ESP_LOGD("touch", "release duration=%lu ms", duration);
+            if (id(ui_mode) == 2) {
+              id(touch_consumed) = false;
+              return;
+            }
 
-            // LONG PRESS (>= 1s): Toggle Voice <-> Music
-            if (duration >= 1000) {
+            if (id(touch_consumed)) {
+              ESP_LOGD("touch", "release ignored (consumed), mode=%d", id(ui_mode));
+              id(touch_consumed) = false;
+              return;
+            }
+            uint32_t duration = millis() - id(touch_start_ms);
+            ESP_LOGD("touch", "release duration=%lu ms mode=%d", duration, id(ui_mode));
+
+            // LONG PRESS (>= 1s): Toggle Voice <-> Music (nur in Voice/Music)
+            if ((id(ui_mode) == 0 || id(ui_mode) == 1) && duration >= 1000) {
               id(ui_mode) = (id(ui_mode) == 0) ? 1 : 0;
               ESP_LOGD("main", "ui_mode toggled to: %d", id(ui_mode));
               id(draw_display).execute();
@@ -288,6 +359,15 @@ touchscreen:
               ESP_LOGD("main", "next playlist via long-ish tap");
               id(next_playlist).execute();
             }
+        - if:
+            condition:
+              lambda: return id(playlist_tap_valid);
+            then:
+              - lambda: id(draw_display).execute();
+              - delay: 180ms
+              - lambda: id(ui_mode) = 1;
+              - lambda: id(draw_display).execute();
+              - lambda: id(playlist_tap_valid) = false;
 
 binary_sensor:
   - platform: template
@@ -585,7 +665,7 @@ script:
   # ✅ Vorwissen-konform:
   # - Liest Playlists aus sensor.music_assistant_playlists_json (JSON)
   # - Wählt per Index (Touch)
-  # - Startet Wiedergabe über media_player.play_media auf media_player.music_assistant_ball
+  # - Startet Wiedergabe über media_player.play_media auf ${ha_player}
   # - Optional: sync input_select.ball_spotify_playlist auf den Playlist-Namen
   - id: start_selected_playlist
     then:
@@ -640,6 +720,17 @@ script:
           ESP_LOGD("playlist", "selected: %s / %s",
             id(chosen_playlist_name).c_str(),
             id(chosen_playlist_uri).c_str());
+          ESP_LOGD("ha", "play_media entity=%s id=%s name=%s type=music enqueue=play",
+            "${ha_player}",
+            id(chosen_playlist_uri).c_str(),
+            id(chosen_playlist_name).c_str());
+      - homeassistant.service:
+          service: media_player.play_media
+          data:
+            media_content_id: !lambda 'return id(chosen_playlist_uri);'
+            media_content_type: "music"
+            entity_id: ${ha_player}
+            enqueue: "play"
 
   # Dein "next_playlist" bleibt als Option (steuert input_select) – kann weiter genutzt werden.
   - id: next_playlist
@@ -661,6 +752,20 @@ script:
           data:
             entity_id: ${ha_player}
 
+  - id: volume_up
+    then:
+      - homeassistant.service:
+          service: media_player.volume_up
+          data:
+            entity_id: ${ha_player}
+
+  - id: volume_down
+    then:
+      - homeassistant.service:
+          service: media_player.volume_down
+          data:
+            entity_id: ${ha_player}
+
   - id: next_track
     then:
       - homeassistant.service:
@@ -674,6 +779,15 @@ script:
           service: media_player.media_previous_track
           data:
             entity_id: ${ha_player}
+
+  - id: show_volume_overlay
+    mode: restart
+    then:
+      - lambda: id(volume_overlay_visible) = true;
+      - script.execute: draw_display
+      - delay: 2s
+      - lambda: id(volume_overlay_visible) = false;
+      - script.execute: draw_display
 
   - id: draw_display
     then:
@@ -690,61 +804,62 @@ script:
                 then:
                   - display.page.show: playlist_page
                   - component.update: s3_box_lcd
-            - if:
-                condition:
-                  lambda: return !id(init_in_progress);
-                then:
+                else:
                   - if:
                       condition:
-                        wifi.connected:
+                        lambda: return !id(init_in_progress);
                       then:
                         - if:
                             condition:
-                              api.connected:
+                              wifi.connected:
                             then:
-                              - lambda: |
-                                  switch(id(voice_assistant_phase)) {
-                                    case ${voice_assist_listening_phase_id}:
-                                      id(s3_box_lcd).show_page(listening_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_thinking_phase_id}:
-                                      id(s3_box_lcd).show_page(thinking_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_replying_phase_id}:
-                                      id(s3_box_lcd).show_page(replying_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_error_phase_id}:
-                                      id(s3_box_lcd).show_page(error_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_muted_phase_id}:
-                                      id(s3_box_lcd).show_page(muted_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_not_ready_phase_id}:
-                                      id(s3_box_lcd).show_page(no_ha_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    case ${voice_assist_timer_finished_phase_id}:
-                                      id(s3_box_lcd).show_page(timer_finished_page);
-                                      id(s3_box_lcd).update();
-                                      break;
-                                    default:
-                                      id(s3_box_lcd).show_page(idle_page);
-                                      id(s3_box_lcd).update();
-                                  }
+                              - if:
+                                  condition:
+                                    api.connected:
+                                  then:
+                                    - lambda: |
+                                        switch(id(voice_assistant_phase)) {
+                                          case ${voice_assist_listening_phase_id}:
+                                            id(s3_box_lcd).show_page(listening_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_thinking_phase_id}:
+                                            id(s3_box_lcd).show_page(thinking_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_replying_phase_id}:
+                                            id(s3_box_lcd).show_page(replying_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_error_phase_id}:
+                                            id(s3_box_lcd).show_page(error_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_muted_phase_id}:
+                                            id(s3_box_lcd).show_page(muted_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_not_ready_phase_id}:
+                                            id(s3_box_lcd).show_page(no_ha_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          case ${voice_assist_timer_finished_phase_id}:
+                                            id(s3_box_lcd).show_page(timer_finished_page);
+                                            id(s3_box_lcd).update();
+                                            break;
+                                          default:
+                                            id(s3_box_lcd).show_page(idle_page);
+                                            id(s3_box_lcd).update();
+                                        }
+                                  else:
+                                    - display.page.show: no_ha_page
+                                    - component.update: s3_box_lcd
                             else:
-                              - display.page.show: no_ha_page
+                              - display.page.show: no_wifi_page
                               - component.update: s3_box_lcd
                       else:
-                        - display.page.show: no_wifi_page
+                        - display.page.show: initializing_page
                         - component.update: s3_box_lcd
-                else:
-                  - display.page.show: initializing_page
-                  - component.update: s3_box_lcd
 
   # ---- Timer Widgets etc. (unverändert aus deinem Code) ----
   - id: fetch_first_active_timer
@@ -1051,9 +1166,47 @@ globals:
     restore_value: no
     initial_value: "0"
 
+  # Playlist scroll / touch state
+  - id: playlist_scroll_px
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: playlist_max_scroll_px
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: playlist_total_items
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: playlist_tap_valid
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: playlist_scroll_target
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: playlist_scroll_anim_v
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: playlist_scroll_anim_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: playlist_scroll_anim_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
   - id: touch_start_ms
     type: uint32_t
     restore_value: no
+  - id: touch_consumed
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
   # ui_mode: 0=Voice, 1=Music, 2=Playlists
   - id: ui_mode
@@ -1095,6 +1248,12 @@ globals:
     initial_value: "false"
 
   - id: boot_sound_played
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  # Volume overlay
+  - id: volume_overlay_visible
     type: bool
     restore_value: no
     initial_value: "false"
@@ -1247,6 +1406,52 @@ text_sensor:
           id(text_response).state = (truncated+"...").c_str();
         }
 
+interval:
+  - interval: 30ms
+    then:
+      - lambda: |-
+          if (id(ui_mode) != 2) {
+            return;
+          }
+          if (!id(playlist_scroll_anim_active)) {
+            return;
+          }
+          uint32_t now_ms = millis();
+          uint32_t dt = now_ms - id(playlist_scroll_anim_last_ms);
+          if (dt == 0) {
+            return;
+          }
+          id(playlist_scroll_anim_last_ms) = now_ms;
+
+          float v = id(playlist_scroll_anim_v);
+          int target = id(playlist_scroll_target);
+          int pos = id(playlist_scroll_px);
+          float diff = (float)(target - pos);
+
+          // Simple spring + damping towards target
+          v += diff * 0.05f;
+          v *= 0.70f;
+          int delta = (int)round(v);
+          if (delta != 0) {
+            int new_scroll = pos + delta;
+            if (new_scroll < 0) new_scroll = 0;
+            int max_scroll = id(playlist_max_scroll_px);
+            if (new_scroll > max_scroll) new_scroll = max_scroll;
+            if (new_scroll != id(playlist_scroll_px)) {
+              id(playlist_scroll_px) = new_scroll;
+              id(draw_display).execute();
+            }
+          }
+
+          if (fabsf(diff) < 1.0f && fabsf(v) < 0.5f) {
+            id(playlist_scroll_px) = target;
+            id(playlist_scroll_anim_active) = false;
+            id(playlist_scroll_anim_v) = 0.0f;
+            id(draw_display).execute();
+          } else {
+            id(playlist_scroll_anim_v) = v;
+          }
+
 color:
   - id: ui_gray
     hex: "A0A0A0"
@@ -1377,6 +1582,17 @@ display:
         lambda: |-
           it.fill(Color::BLACK);
 
+          // Volume indicator (small, top center) + +/- icons
+          if (!isnan(id(ha_volume_level).state)) {
+            int vol_pct = (int)roundf(id(ha_volume_level).state * 100.0f);
+            it.printf(120, 2, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "Vol %d%%", vol_pct);
+            if (id(volume_overlay_visible)) {
+              it.printf(120, 12, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+            }
+          }
+          it.printf(10, 2, id(font_response), id(ui_gray), TextAlign::TOP_LEFT, "-");
+          it.printf(230, 2, id(font_response), id(ui_gray), TextAlign::TOP_RIGHT, "+");
+
           // Title
           it.printf(120, 20, id(font_response), Color::WHITE, TextAlign::TOP_CENTER, "%s",
                     id(music_title).state.c_str());
@@ -1441,16 +1657,57 @@ display:
             return;
           }
 
-          // Anzeige: max 6 Einträge
-          int y = 45;
-          int max_items = std::min((int)arr.size(), 6);
+          const int list_start_y = 40;
+          const int row_h = 35;
+          const int visible_rows = 6;
+          const int visible_h = row_h * visible_rows;
 
-          for (int i = 0; i < max_items; i++) {
-            JsonObject pl = arr[i].as<JsonObject>();
-            const char* name = pl["name"] | "";
+          // Subtle up/down zone markers
+          it.line(12, list_start_y, 228, list_start_y, id(ui_darkgray));
+          it.printf(120, list_start_y - 16, id(font_timer), id(ui_darkgray), TextAlign::TOP_CENTER, "^");
+          it.line(12, list_start_y + visible_h, 228, list_start_y + visible_h, id(ui_darkgray));
+          it.printf(120, list_start_y + visible_h - 14, id(font_timer), id(ui_darkgray), TextAlign::TOP_CENTER, "v");
 
-            it.rectangle(10, y-5, 220, 30, id(ui_darkgray));
-            it.printf(120, y, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%s", name);
-            y += 35;
+          id(playlist_total_items) = (int)arr.size();
+          int total_h = id(playlist_total_items) * row_h;
+          id(playlist_max_scroll_px) = std::max(0, total_h - visible_h);
+          if (id(playlist_scroll_px) > id(playlist_max_scroll_px)) {
+            id(playlist_scroll_px) = id(playlist_max_scroll_px);
           }
 
+          int first_index = id(playlist_scroll_px) / row_h;
+          int offset_y = -(id(playlist_scroll_px) % row_h);
+
+          for (int i = 0; i < visible_rows; i++) {
+            int index = first_index + i;
+            if (index >= id(playlist_total_items)) break;
+
+            int y = list_start_y + offset_y + i * row_h;
+            JsonObject pl = arr[index].as<JsonObject>();
+            const char* name = pl["name"] | "";
+
+            if (index == id(selected_playlist_index)) {
+              it.filled_rectangle(10, y-5, 214, 30, id(ui_green));
+              it.rectangle(10, y-5, 214, 30, id(ui_darkgray));
+              it.printf(120, y, id(font_request), Color::BLACK, TextAlign::TOP_CENTER, "%s", name);
+            } else {
+              it.rectangle(10, y-5, 214, 30, id(ui_darkgray));
+              it.printf(120, y, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%s", name);
+            }
+          }
+
+          // Scroll-Indikator
+          if (id(playlist_total_items) > visible_rows) {
+            const int track_x = 226;
+            const int track_y = list_start_y;
+            const int track_w = 6;
+            const int track_h = 200;
+            it.filled_rectangle(track_x, track_y, track_w, track_h, id(ui_darkgray));
+
+            int thumb_h = std::max(24, (int)((float)visible_h / (float)total_h * track_h));
+            int thumb_y = track_y;
+            if (id(playlist_max_scroll_px) > 0) {
+              thumb_y = track_y + (int)((float)id(playlist_scroll_px) / (float)id(playlist_max_scroll_px) * (track_h - thumb_h));
+            }
+            it.filled_rectangle(track_x, thumb_y, track_w, thumb_h, id(ui_green));
+          }
