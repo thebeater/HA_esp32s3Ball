@@ -1,0 +1,62 @@
+automation:
+  - alias: MA Playlists JSON aktualisieren
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+    action:
+      - service: music_assistant.get_library
+        response_variable: ma_playlists
+        data:
+          config_entry_id: 01JHW7E4AR2AZ2CDBJKDV20N8R
+          media_type: playlist
+          limit: 40
+      - service: mqtt.publish
+        data:
+          topic: ball/ma/playlists
+          retain: true
+          payload: >
+            {% set ns = namespace(out=[]) %}
+            {% if ma_playlists and 'items' in ma_playlists %}
+              {% for item in ma_playlists['items'] %}
+                {% set ns.out = ns.out + [ {
+                  "uri": item.uri,
+                  "name": item.name,
+                  "media_type": "music"
+                } ] %}
+              {% endfor %}
+            {% endif %}
+            {{ ns.out | to_json }}
+
+  - alias: MA Radios JSON aktualisieren
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+    action:
+      - service: music_assistant.get_library
+        response_variable: ma_radios
+        data:
+          config_entry_id: 01JHW7E4AR2AZ2CDBJKDV20N8R
+          media_type: radio
+          limit: 40
+      - service: mqtt.publish
+        data:
+          topic: ball/ma/radios
+          retain: true
+          payload: >
+            {% set ns = namespace(out=[]) %}
+            {% if ma_radios and 'items' in ma_radios %}
+              {% for item in ma_radios['items'] %}
+                {% set ns.out = ns.out + [ {
+                  "uri": item.uri,
+                  "name": item.name,
+                  "media_type": "radio"
+                } ] %}
+              {% endfor %}
+            {% endif %}
+            {{ ns.out | to_json }}
