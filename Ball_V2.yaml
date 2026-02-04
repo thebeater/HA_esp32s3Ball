@@ -217,7 +217,9 @@ sensor:
 touchscreen:
   - platform: cst816
     i2c_id: bus_b
-    interrupt_pin: ${touch_input_pin}
+    interrupt_pin:
+      number: ${touch_input_pin}
+      allow_other_uses: true
     reset_pin: ${touch_reset_pin}
     id: touch_dp
 
