@@ -2,9 +2,11 @@ substitutions:
   name: esphome-web-0bac48
   friendly_name: "Xiaozhi Ball V2"
   ha_base_url: "http://server.local:8123"
+  bg_image_url: "http://server.local:8123/local/ball_bg.png"
 
   # === Vorwissen: HA / Music Assistant Entities ===
-  ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
+  #ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
+  ha_player: "media_player.wohnzimmer_airplay"          # Transport controls + Playlist playback
   playlist_selector: "input_select.ball_spotify_playlist"
   mqtt_host: "server.local"
   mqtt_username: !secret mqtt_username
@@ -87,6 +89,9 @@ esphome:
       - script.execute: draw_display
       - component.update: battery_voltage
       - component.update: battery_percentage
+      - lambda: id(bg_image).update();
+      - delay: 2s
+      - script.execute: draw_display
       - delay: 30s
       - if:
           condition:
@@ -126,6 +131,9 @@ api:
             id(play_sound)->execute(true, id(ready_sound));
           }
         }
+    - lambda: id(bg_image).update();
+    - delay: 2s
+    - script.execute: draw_display
   on_client_disconnected:
     - script.execute: draw_display
 
@@ -145,10 +153,15 @@ logger:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  fast_connect: true
   ap:
     ssid: "Ball v2 Hotspot"
     password: "RZ7D3EzJdPM6"
+  power_save_mode: none
   on_connect:
+    - script.execute: draw_display
+    - lambda: id(bg_image).update();
+    - delay: 2s
     - script.execute: draw_display
   on_disconnect:
     - script.execute: draw_display
@@ -247,6 +260,10 @@ touchscreen:
               id(touch_consumed) = true;
               id(touch_start_ms) = millis();
               return;
+            }
+            if (id(soft_sleep_active)) {
+              id(soft_sleep_active) = false;
+              id(backlight_full).execute();
             }
 
             // ====== PLAYLIST PAGE (ui_mode=2) ======
@@ -852,6 +869,12 @@ script:
           id: Sled
           brightness: 30%
 
+  - id: backlight_soft
+    then:
+      - light.turn_on:
+          id: Sled
+          brightness: 1%
+
   - id: backlight_full
     then:
       - light.turn_on:
@@ -1360,6 +1383,11 @@ globals:
     restore_value: no
     initial_value: "false"
 
+  - id: soft_sleep_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
 image:
   - file: ${error_illustration_file}
     id: casita_error
@@ -1423,6 +1451,12 @@ online_image:
     type: RGB565
     resize: ${imagewidth}x${imageheight}
     update_interval: 5min
+  - id: bg_image
+    url: ${bg_image_url}
+    format: PNG
+    type: RGB565
+    resize: ${imagewidth}x${imageheight}
+    update_interval: 1min
 
 deep_sleep:
   id: deep_sleep_1
@@ -1623,7 +1657,24 @@ interval:
             - script.execute: draw_display
       - if:
           condition:
+            lambda: return (millis() - id(last_touch_ms)) >= 30000 && !id(soft_sleep_active);
+          then:
+            - lambda: id(soft_sleep_active) = true;
+            - script.execute: backlight_soft
+      - if:
+          condition:
+            lambda: return (millis() - id(last_touch_ms)) < 30000 && id(soft_sleep_active);
+          then:
+            - lambda: id(soft_sleep_active) = false;
+            - script.execute: backlight_full
+      - if:
+          condition:
             lambda: return !id(music_playing).state && (millis() - id(last_touch_ms)) >= 60000;
+          then:
+            - deep_sleep.enter: deep_sleep_1
+      - if:
+          condition:
+            lambda: return (millis() - id(last_touch_ms)) >= 300000;
           then:
             - deep_sleep.enter: deep_sleep_1
       - if:
@@ -1688,13 +1739,23 @@ display:
           it.fill(id(idle_color));
           it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_idle), ImageAlign::CENTER);
           if (id(show_battery_status).state) {
-            const int box_top = 2;
+            const int box_top = 7;
             const int box_height = 28;
-            it.filled_rectangle((it.get_width()/2)-40, box_top, 80, box_height, Color::WHITE);
-            it.rectangle((it.get_width()/2)-40, box_top, 80, box_height, Color::BLACK);
+            const int center_x = (it.get_width()/2) + 10;
+            it.filled_rectangle(center_x - 40, box_top, 80, box_height, Color::WHITE);
+            it.rectangle(center_x - 40, box_top, 80, box_height, Color::BLACK);
             char battery_text[16];
             snprintf(battery_text, sizeof(battery_text), "%.0f%%", id(battery_percentage).state);
-            it.printf(it.get_width() / 2, 4, id(font_battery), Color::BLACK, TextAlign::TOP_CENTER, "%s", battery_text);
+            it.printf(center_x, 9, id(font_battery), Color::BLACK, TextAlign::TOP_CENTER, "%s", battery_text);
+
+            // Left-side symmetric battery with icon
+            const int left_center_x = (it.get_width()/2) - 90;
+            it.filled_rectangle(left_center_x - 26, box_top, 52, box_height, Color::WHITE);
+            it.rectangle(left_center_x - 26, box_top, 52, box_height, Color::BLACK);
+            // battery icon
+            it.rectangle(left_center_x - 18, box_top + 6, 18, 16, Color::BLACK);
+            it.filled_rectangle(left_center_x + 0, box_top + 10, 3, 8, Color::BLACK);
+            it.printf(left_center_x + 16, 9, id(font_request), Color::BLACK, TextAlign::TOP_CENTER, "%s", battery_text);
           }
           id(draw_timer_timeline).execute();
           id(draw_active_timer_widget).execute();
@@ -1772,7 +1833,7 @@ display:
       # ==========================
       - id: music_page
         lambda: |-
-          it.fill(Color::BLACK);
+          it.image((it.get_width() / 2), (it.get_height() / 2), id(bg_image), ImageAlign::CENTER);
 
           // Volume indicators (inside round display area)
           if (id(volume_overlay_visible)) {
@@ -1784,7 +1845,7 @@ display:
           }
           if (!isnan(id(ha_volume_level).state)) {
             int vol_pct = (int)roundf(id(ha_volume_level).state * 100.0f);
-            it.printf(120, 10, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "%d%%", vol_pct);
+            it.printf(120, 10, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             if (id(volume_overlay_visible)) {
               it.printf(120, 14, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             }
@@ -1809,12 +1870,7 @@ display:
           it.line(0, 155, 240, 155, id(ui_darkgray));
 
           // Control zones (Prev / PlayPause / Next)
-          it.filled_rectangle(0, 90, 80, 60, Color::BLACK);
-
-          it.filled_rectangle(80, 90, 80, 60, Color::BLACK);
           it.rectangle(80, 90, 80, 60, id(ui_darkgray));
-
-          it.filled_rectangle(160, 90, 80, 60, Color::BLACK);
 
 
           it.printf(40, 120, id(font_timer), Color::WHITE, TextAlign::CENTER, "<<");
@@ -1869,7 +1925,7 @@ display:
           const int visible_h = row_h * visible_rows;
 
           // Curved top toggle (Playlists / Radio)
-          auto draw_arc_text = [&](const std::string &text, float start_deg, float end_deg, Color color, const esphome::font::Font *font) {
+          auto draw_arc_text = [&](const std::string &text, float start_deg, float end_deg, Color color, esphome::display::BaseFont *font) {
             int n = text.size();
             if (n <= 0) return;
             float r = 108.0f;
@@ -1937,18 +1993,39 @@ display:
             }
           }
 
-          // Scroll-Indikator
+          // Scroll-Indikator (rund am rechten Rand, 45° oben bis 45° unten)
           if (id(playlist_total_items) > visible_rows) {
-            const int track_x = 226;
-            const int track_y = list_start_y;
-            const int track_w = 6;
-            const int track_h = 200;
-            it.filled_rectangle(track_x, track_y, track_w, track_h, id(ui_darkgray));
-
-            int thumb_h = std::max(24, (int)((float)visible_h / (float)total_h * track_h));
-            int thumb_y = track_y;
+            float ratio = 0.0f;
             if (id(playlist_max_scroll_px) > 0) {
-              thumb_y = track_y + (int)((float)id(playlist_scroll_px) / (float)id(playlist_max_scroll_px) * (track_h - thumb_h));
+              ratio = (float)id(playlist_scroll_px) / (float)id(playlist_max_scroll_px);
             }
-            it.filled_rectangle(track_x, thumb_y, track_w, thumb_h, id(ui_green));
+            float start_deg = -45.0f;
+            float end_deg = 45.0f;
+            float deg = start_deg + (end_deg - start_deg) * ratio;
+            float rad = deg * 3.1415926f / 180.0f;
+            float cx = 120.0f;
+            float cy = 120.0f;
+            float r = 112.0f;
+            int x = (int)roundf(cx + cosf(rad) * r);
+            int y = (int)roundf(cy + sinf(rad) * r);
+
+            // Track arc (subtle)
+            int prev_x = 0;
+            int prev_y = 0;
+            bool has_prev = false;
+            for (int i = 0; i <= 20; i++) {
+              float t = (float)i / 20.0f;
+              float d = start_deg + (end_deg - start_deg) * t;
+              float rr = d * 3.1415926f / 180.0f;
+              int tx = (int)roundf(cx + cosf(rr) * r);
+              int ty = (int)roundf(cy + sinf(rr) * r);
+              if (has_prev) {
+                it.line(prev_x, prev_y, tx, ty, id(ui_darkgray));
+              }
+              prev_x = tx;
+              prev_y = ty;
+              has_prev = true;
+            }
+
+            it.filled_circle(x, y, 5, id(ui_green));
           }
