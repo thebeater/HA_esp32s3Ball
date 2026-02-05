@@ -1488,6 +1488,15 @@ font:
   - file:
       type: gfonts
       family: ${font_family}
+      weight: 700
+    id: font_bold
+    size: 15
+    glyphsets:
+      - ${font_glyphsets}
+
+  - file:
+      type: gfonts
+      family: ${font_family}
       weight: 300
     id: font_small
     size: 12
@@ -1837,26 +1846,49 @@ display:
 
           // Volume indicators (inside round display area)
           if (id(volume_overlay_visible)) {
-            it.printf(60, 6, id(font_timer), id(ui_gray), TextAlign::CENTER, "-");
-            it.printf(180, 6, id(font_timer), id(ui_gray), TextAlign::CENTER, "+");
+            it.printf(60, 2, id(font_timer), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, 2, id(font_timer), id(ui_gray), TextAlign::CENTER, "+");
           } else {
-            it.printf(60, 8, id(font_response), id(ui_gray), TextAlign::CENTER, "-");
-            it.printf(180, 8, id(font_response), id(ui_gray), TextAlign::CENTER, "+");
+            it.printf(60, 4, id(font_response), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, 4, id(font_response), id(ui_gray), TextAlign::CENTER, "+");
           }
           if (!isnan(id(ha_volume_level).state)) {
             int vol_pct = (int)roundf(id(ha_volume_level).state * 100.0f);
-            it.printf(120, 10, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+            it.printf(120, 2, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             if (id(volume_overlay_visible)) {
-              it.printf(120, 14, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+              it.printf(120, 8, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             }
           }
 
-          // Title
-          it.printf(120, 36, id(font_response), Color::WHITE, TextAlign::TOP_CENTER, "%s",
-                    id(music_title).state.c_str());
+          // Battery status (music page)
+          if (id(show_battery_status).state) {
+            char battery_text[16];
+            snprintf(battery_text, sizeof(battery_text), "%.0f%%", id(battery_percentage).state);
+            const int bx = 18;
+            const int by = 26;
+            it.rectangle(bx, by, 16, 10, Color::WHITE);
+            it.filled_rectangle(bx + 16, by + 3, 3, 4, Color::WHITE);
+            it.printf(bx + 32, by - 2, id(font_small), Color::WHITE, TextAlign::TOP_LEFT, "%s", battery_text);
+          }
+
+          // Title (marquee if too long)
+          const std::string title = id(music_title).state.c_str();
+          const int title_area_w = 200;
+          const int title_left_x = 20;
+          const int approx_char_w = 8;
+          int title_w = title.size() * approx_char_w;
+          if (title_w > title_area_w) {
+            int pad = 40;
+            int span = title_w + pad;
+            int offset = (millis() / 40) % span;
+            int x = title_left_x + title_area_w - offset;
+            it.printf(x, 36, id(font_response), Color::WHITE, TextAlign::TOP_LEFT, "%s", title.c_str());
+          } else {
+            it.printf(120, 36, id(font_response), Color::WHITE, TextAlign::TOP_CENTER, "%s", title.c_str());
+          }
 
           // Artist
-          it.printf(120, 58, id(font_request), id(ui_gray), TextAlign::TOP_CENTER, "%s",
+          it.printf(120, 58, id(font_bold), id(ui_gray), TextAlign::TOP_CENTER, "%s",
                     id(music_artist).state.c_str());
 
           // Time (bottom center, as low as possible)
