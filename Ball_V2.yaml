@@ -5,14 +5,16 @@ substitutions:
   bg_image_url: "http://server.local:8123/local/ball_bg.png"
 
   # === Vorwissen: HA / Music Assistant Entities ===
-  #ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
-  ha_player: "media_player.wohnzimmer_airplay"          # Transport controls + Playlist playback
+  ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
+  #ha_player: "media_player.kuche_2"          # Transport controls + Playlist playback
+  #ha_player: "media_player.wohnzimmer_airplay"          # Transport controls + Playlist playback
   playlist_selector: "input_select.ball_spotify_playlist"
   mqtt_host: "server.local"
   mqtt_username: !secret mqtt_username
   mqtt_password: !secret mqtt_password
   playlist_json_sensor: "ball/ma/playlists"
   radio_json_sensor: "ball/ma/radios"
+  podcast_json_sensor: "ball/ma/podcasts"
 
   # Display / Model
   imagemodel: "HA-character"
@@ -272,31 +274,31 @@ touchscreen:
             // List start y=40, row height=35, max 6.
             if (id(ui_mode) == 2) {
               const int list_start_y = 40;
-              const int row_h = 35;
+              const int row_h = 30;
               const int visible_rows = 6;
               const int visible_h = row_h * visible_rows;
-              const int up_zone_h = 28;
-              const int down_zone_h = 28;
+              const int header_h = 28;
+              const int up_zone_top = header_h;
+              const int up_zone_bottom = list_start_y + 20;
+              const int down_zone_top = list_start_y + visible_h;
 
-              // Header toggle area (Playlists / Radio)
-              if (y < 28) {
-                int new_mode = (x < 120) ? 0 : 1;
-                if (id(list_mode) != new_mode) {
-                  id(list_mode) = new_mode;
-                  id(playlist_scroll_px) = 0;
-                  id(playlist_scroll_target) = 0;
-                  id(playlist_scroll_anim_active) = false;
-                  id(draw_display).execute();
-                }
+              // Header toggle area (only when at top)
+              if (id(playlist_scroll_px) <= 1 && y < header_h) {
+                id(list_mode) = (id(list_mode) + 1) % 3;
+                id(playlist_scroll_px) = 0;
+                id(playlist_scroll_target) = 0;
+                id(playlist_scroll_anim_active) = false;
+                id(draw_display).execute();
                 id(touch_consumed) = true;
                 id(touch_start_ms) = millis();
                 return;
               }
 
-              // Up/Down zones (five rows step)
-              if (y < (list_start_y + up_zone_h)) {
+              // Up/Down zones (three rows step, outside list area)
+              // Up-zone active only when list is scrolled down
+              if (id(playlist_scroll_px) > 0 && y >= up_zone_top && y < up_zone_bottom) {
                 if (id(playlist_scroll_px) > 0) {
-                  int target = id(playlist_scroll_px) - (row_h * 5);
+                  int target = id(playlist_scroll_px) - (row_h * 3);
                   if (target < 0) target = 0;
                   id(playlist_scroll_target) = target;
                   id(playlist_scroll_anim_active) = true;
@@ -306,11 +308,13 @@ touchscreen:
                   id(touch_start_ms) = millis();
                   ESP_LOGD("touch", "playlist up zone -> target=%d", id(playlist_scroll_target));
                 }
+                ESP_LOGD("touch", "up zone: y=%d scroll_px=%d max=%d target=%d",
+                  y, id(playlist_scroll_px), id(playlist_max_scroll_px), id(playlist_scroll_target));
                 return;
               }
-              if (y > (list_start_y + visible_h - down_zone_h)) {
+              if (y >= down_zone_top) {
                 if (id(playlist_scroll_px) < id(playlist_max_scroll_px)) {
-                  int target = id(playlist_scroll_px) + (row_h * 5);
+                  int target = id(playlist_scroll_px) + (row_h * 3);
                   if (target > id(playlist_max_scroll_px)) target = id(playlist_max_scroll_px);
                   id(playlist_scroll_target) = target;
                   id(playlist_scroll_anim_active) = true;
@@ -320,18 +324,24 @@ touchscreen:
                   id(touch_start_ms) = millis();
                   ESP_LOGD("touch", "playlist down zone -> target=%d", id(playlist_scroll_target));
                 }
+                ESP_LOGD("touch", "down zone: y=%d scroll_px=%d max=%d target=%d",
+                  y, id(playlist_scroll_px), id(playlist_max_scroll_px), id(playlist_scroll_target));
                 return;
               }
 
               // Tap on list item -> select
-              if (y >= list_start_y && y <= (list_start_y + visible_h)) {
+              if (y >= (list_start_y + 20) && y <= (list_start_y + visible_h - 20)) {
                 int relative_y = (y - list_start_y) + id(playlist_scroll_px);
                 int index = relative_y / row_h;
+                ESP_LOGD("touch", "list tap y=%d rel=%d idx=%d scroll_px=%d",
+                  y, relative_y, index, id(playlist_scroll_px));
                 if (relative_y >= 0 && index >= 0 && index < id(playlist_total_items)) {
                   if (id(list_mode) == 0) {
                     id(selected_playlist_index) = index;
-                  } else {
+                  } else if (id(list_mode) == 1) {
                     id(selected_radio_index) = index;
+                  } else {
+                    id(selected_podcast_index) = index;
                   }
                   id(start_selected_playlist).execute();
                   id(playlist_tap_valid) = true;
@@ -734,7 +744,10 @@ script:
   - id: start_selected_playlist
     then:
       - lambda: |-
-          std::string raw = (id(list_mode) == 0) ? id(ma_playlists_json_raw).state : id(ma_radios_json_raw).state;
+          std::string raw =
+            (id(list_mode) == 0) ? id(ma_playlists_json_raw).state :
+            (id(list_mode) == 1) ? id(ma_radios_json_raw).state :
+                                   id(ma_podcasts_json_raw).state;
 
           if (raw.empty()) {
             ESP_LOGW("playlist", "playlist json empty");
@@ -763,7 +776,10 @@ script:
             return;
           }
 
-          int idx = (id(list_mode) == 0) ? id(selected_playlist_index) : id(selected_radio_index);
+          int idx =
+            (id(list_mode) == 0) ? id(selected_playlist_index) :
+            (id(list_mode) == 1) ? id(selected_radio_index) :
+                                   id(selected_podcast_index);
           if (idx < 0 || idx >= (int)arr.size()) {
             ESP_LOGW("playlist", "index out of range");
             id(chosen_playlist_name) = "";
@@ -873,7 +889,7 @@ script:
     then:
       - light.turn_on:
           id: Sled
-          brightness: 1%
+          brightness: 10%
 
   - id: backlight_full
     then:
@@ -1268,8 +1284,12 @@ globals:
     type: int
     restore_value: no
     initial_value: "0"
+  - id: selected_podcast_index
+    type: int
+    restore_value: no
+    initial_value: "0"
 
-  # List mode: 0=Playlists, 1=Radio
+  # List mode: 0=Playlists, 1=Radio, 2=Podcasts
   - id: list_mode
     type: int
     restore_value: no
@@ -1537,6 +1557,12 @@ text_sensor:
     on_value:
       - script.execute: draw_display
 
+  - platform: mqtt_subscribe
+    id: ma_podcasts_json_raw
+    topic: ${podcast_json_sensor}
+    on_value:
+      - script.execute: draw_display
+
   - platform: homeassistant
     id: playlist_selected
     entity_id: ${playlist_selector}
@@ -1632,8 +1658,8 @@ interval:
           float diff = (float)(target - pos);
 
           // Simple spring + damping towards target
-          v += diff * 0.05f;
-          v *= 0.70f;
+          v += diff * 0.08f;
+          v *= 0.60f;
           int delta = (int)round(v);
           if (delta != 0) {
             int new_scroll = pos + delta;
@@ -1653,6 +1679,9 @@ interval:
             id(draw_display).execute();
           } else {
             id(playlist_scroll_anim_v) = v;
+          }
+          if (id(playlist_scroll_px) <= 3) {
+            id(playlist_scroll_px) = 0;
           }
 
   - interval: 1s
@@ -1845,18 +1874,19 @@ display:
           it.image((it.get_width() / 2), (it.get_height() / 2), id(bg_image), ImageAlign::CENTER);
 
           // Volume indicators (inside round display area)
+          const int vol_y = 24;
           if (id(volume_overlay_visible)) {
-            it.printf(60, 2, id(font_timer), id(ui_gray), TextAlign::CENTER, "-");
-            it.printf(180, 2, id(font_timer), id(ui_gray), TextAlign::CENTER, "+");
+            it.printf(60, vol_y, id(font_timer), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, vol_y, id(font_timer), id(ui_gray), TextAlign::CENTER, "+");
           } else {
-            it.printf(60, 4, id(font_response), id(ui_gray), TextAlign::CENTER, "-");
-            it.printf(180, 4, id(font_response), id(ui_gray), TextAlign::CENTER, "+");
+            it.printf(60, vol_y + 2, id(font_response), id(ui_gray), TextAlign::CENTER, "-");
+            it.printf(180, vol_y + 2, id(font_response), id(ui_gray), TextAlign::CENTER, "+");
           }
           if (!isnan(id(ha_volume_level).state)) {
             int vol_pct = (int)roundf(id(ha_volume_level).state * 100.0f);
-            it.printf(120, 2, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+            it.printf(120, vol_y, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             if (id(volume_overlay_visible)) {
-              it.printf(120, 8, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
+              it.printf(120, vol_y + 6, id(font_timer), Color::WHITE, TextAlign::TOP_CENTER, "%d%%", vol_pct);
             }
           }
 
@@ -1865,7 +1895,7 @@ display:
             char battery_text[16];
             snprintf(battery_text, sizeof(battery_text), "%.0f%%", id(battery_percentage).state);
             const int bx = 18;
-            const int by = 26;
+            const int by = 24;
             it.rectangle(bx, by, 16, 10, Color::WHITE);
             it.filled_rectangle(bx + 16, by + 3, 3, 4, Color::WHITE);
             it.printf(bx + 32, by - 2, id(font_small), Color::WHITE, TextAlign::TOP_LEFT, "%s", battery_text);
@@ -1888,7 +1918,7 @@ display:
           }
 
           // Artist
-          it.printf(120, 58, id(font_bold), id(ui_gray), TextAlign::TOP_CENTER, "%s",
+          it.printf(120, 58, id(font_bold), Color::WHITE, TextAlign::TOP_CENTER, "%s",
                     id(music_artist).state.c_str());
 
           // Time (bottom center, as low as possible)
@@ -1931,7 +1961,10 @@ display:
       # ==========================
       - id: playlist_page
         lambda: |-
-          std::string raw = (id(list_mode) == 0) ? id(ma_playlists_json_raw).state.c_str() : id(ma_radios_json_raw).state.c_str();
+          std::string raw =
+            (id(list_mode) == 0) ? id(ma_playlists_json_raw).state.c_str() :
+            (id(list_mode) == 1) ? id(ma_radios_json_raw).state.c_str() :
+                                   id(ma_podcasts_json_raw).state.c_str();
           if (raw.empty()) {
             it.printf(120, 120, id(font_request), id(ui_gray), TextAlign::CENTER, "no data");
             return;
@@ -1952,38 +1985,17 @@ display:
           }
 
           const int list_start_y = 40;
-          const int row_h = 35;
+          const int row_h = 30;
           const int visible_rows = 6;
           const int visible_h = row_h * visible_rows;
 
-          // Curved top toggle (Playlists / Radio)
-          auto draw_arc_text = [&](const std::string &text, float start_deg, float end_deg, Color color, esphome::display::BaseFont *font) {
-            int n = text.size();
-            if (n <= 0) return;
-            float r = 108.0f;
-            float cx = 120.0f;
-            float cy = 120.0f;
-            for (int i = 0; i < n; i++) {
-              float t = (n == 1) ? 0.5f : (float)i / (float)(n - 1);
-              float deg = start_deg + (end_deg - start_deg) * t;
-              float rad = deg * 3.1415926f / 180.0f;
-              int x = (int)roundf(cx + cosf(rad) * r);
-              int y = (int)roundf(cy + sinf(rad) * r);
-              char ch[2] = { text[i], 0 };
-              it.printf(x, y, font, color, TextAlign::CENTER, "%s", ch);
-            }
-          };
-
-          // Dark header background when at top
-          if (id(playlist_scroll_px) == 0) {
-            it.filled_rectangle(0, 0, 240, 32, id(ui_verydarkgray));
-          }
-          if (id(list_mode) == 0) {
-            draw_arc_text("Playlists", -150.0f, -100.0f, Color::WHITE, id(font_small));
-            draw_arc_text("Radio", -80.0f, -40.0f, id(ui_gray), id(font_small));
-          } else {
-            draw_arc_text("Playlists", -150.0f, -100.0f, id(ui_gray), id(font_small));
-            draw_arc_text("Radio", -80.0f, -40.0f, Color::WHITE, id(font_small));
+          // Top label + next toggle
+          bool at_top = id(playlist_scroll_px) <= 1;
+          if (at_top) {
+            it.filled_rectangle(0, 0, 240, 28, id(ui_verydarkgray));
+            const char* mode_label = (id(list_mode) == 0) ? "Playlist" : (id(list_mode) == 1) ? "Radio" : "Podcast";
+            it.printf(120, 4, id(font_request), Color::WHITE, TextAlign::TOP_CENTER, "%s", mode_label);
+            it.printf(210, 4, id(font_request), id(ui_gray), TextAlign::TOP_LEFT, ">>");
           }
 
           // Subtle up/down zone markers (hide up when already at top)
@@ -2014,7 +2026,10 @@ display:
             JsonObject pl = arr[index].as<JsonObject>();
             const char* name = pl["name"] | "";
 
-            int sel_idx = (id(list_mode) == 0) ? id(selected_playlist_index) : id(selected_radio_index);
+            int sel_idx =
+              (id(list_mode) == 0) ? id(selected_playlist_index) :
+              (id(list_mode) == 1) ? id(selected_radio_index) :
+                                     id(selected_podcast_index);
             if (index == sel_idx) {
               it.filled_rectangle(10, y-5, 214, 30, id(ui_green));
               it.rectangle(10, y-5, 214, 30, id(ui_darkgray));

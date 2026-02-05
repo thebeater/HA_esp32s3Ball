@@ -21,11 +21,13 @@ automation:
             {% set ns = namespace(out=[]) %}
             {% if ma_playlists and 'items' in ma_playlists %}
               {% for item in ma_playlists['items'] %}
-                {% set ns.out = ns.out + [ {
-                  "uri": item.uri,
-                  "name": item.name,
-                  "media_type": "music"
-                } ] %}
+                {% if item.favorite and not item.explicit %}
+                  {% set ns.out = ns.out + [ {
+                    "uri": item.uri,
+                    "name": item.name,
+                    "media_type": "music"
+                  } ] %}
+                {% endif %}
               {% endfor %}
             {% endif %}
             {{ ns.out | to_json }}
@@ -57,6 +59,39 @@ automation:
                   "name": item.name,
                   "media_type": "radio"
                 } ] %}
+              {% endfor %}
+            {% endif %}
+            {{ ns.out | to_json }}
+
+  - alias: MA Podcasts JSON aktualisieren
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+    action:
+      - service: music_assistant.get_library
+        response_variable: ma_podcasts
+        data:
+          config_entry_id: 01JHW7E4AR2AZ2CDBJKDV20N8R
+          media_type: podcast
+          limit: 40
+      - service: mqtt.publish
+        data:
+          topic: ball/ma/podcasts
+          retain: true
+          payload: >
+            {% set ns = namespace(out=[]) %}
+            {% if ma_podcasts and 'items' in ma_podcasts %}
+              {% for item in ma_podcasts['items'] %}
+                {% if item.favorite %}
+                  {% set ns.out = ns.out + [ {
+                    "uri": item.uri,
+                    "name": item.name,
+                    "media_type": "podcast"
+                  } ] %}
+                {% endif %}
               {% endfor %}
             {% endif %}
             {{ ns.out | to_json }}

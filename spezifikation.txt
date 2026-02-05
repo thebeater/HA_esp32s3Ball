@@ -1,0 +1,151 @@
+Spezifikation: Xiaozhi Ball V2 (ESPHome) – Media UI
+Datum: 2026-02-05
+
+1. Ziel
+- Touch-UI für Musik, Playlists, Radio und Podcasts auf rundem 240x240 Display.
+- Musiksteuerung über Home Assistant (HA) / Music Assistant (MA).
+- Playlists/Radio/Podcasts per MQTT bereitstellen.
+
+2. Hardware & Basis
+- ESP32‑S3, GC9A01A Display (240x240, rund), CST816 Touch.
+- Audio I2S, Backlight per LEDC (monochrom).
+- Deep Sleep Wake per Touch-IRQ (GPIO12, allow_other_uses).
+
+3. Betriebsmodi / UI-Modi
+- ui_mode = 0: Voice/Assist Seiten (idle/listening/…).
+- ui_mode = 1: Music Page (Playback, Titel, Künstler, Lautstärke, Playlist/Radio/Podcast Anzeige).
+- ui_mode = 2: Listen Page (Playlists/Radio/Podcasts).
+
+4. Datenquellen
+- HA Media Player: ${ha_player}
+- MQTT Topics:
+  - ball/ma/playlists
+  - ball/ma/radios
+  - ball/ma/podcasts
+- JSON Struktur pro Topic: Array von Objekten
+  - { "uri": "...", "name": "...", "media_type": "music|radio|podcast" }
+
+5. Home Assistant Automationen (Ball_V2_HA_auto_PlayListRadioHelper.yaml)
+- Playlists: MA get_library(media_type=playlist) → MQTT publish ball/ma/playlists.
+  - Filter: favorite == true und explicit == false.
+- Radios: MA get_library(media_type=radio) → MQTT publish ball/ma/radios.
+  - Filter: favorite == true (kein explicit Filter).
+- Podcasts: MA get_library(media_type=podcast) → MQTT publish ball/ma/podcasts.
+  - Filter: favorite == true (kein explicit Filter).
+- MQTT publish mit retain=true.
+
+6. Music Page (ui_mode=1)
+- Hintergrundbild: online_image bg_image aus HA /local.
+- Lautstärkeanzeige: weiß; +/- oben; Touch-Zonen oben links/rechts.
+- Titel: schwarz, Marquee bei Überlänge (scroll rechts→links).
+- Interpret: fett, dunkles Grau.
+- Playlist/Radio/Podcast Label: zeigt current_media_label.
+- Controls: Prev/Play/Next; Play/Pause als gezeichnete Symbole.
+- Uhrzeit unten mittig (HH:MM).
+- Batterieanzeige (Icon + %).
+
+7. Listen Page (ui_mode=2)
+- Drei Listentypen: Playlist (0), Radio (1), Podcast (2).
+- Header zeigt aktuellen Typ + ">>" (nur wenn ganz oben).
+- Header-toggle: nur aktiv, wenn scroll_px <= 1.
+- Scroll:
+  - Scroll-Down: unterer Bereich, bewegt 3 Einträge pro Tap.
+  - Scroll-Up: oberer Bereich, aktiv nur wenn scroll_px > 0.
+  - Listentaps nur im mittleren Bereich (oben/unten 20px ausgeschlossen).
+- Auswahl: Tap startet media_player.play_media mit media_content_id+media_content_type.
+
+8. Cover / Idle
+- Bei 60s ohne Touch und Musik läuft: Cover Page (online_image cover_image), Backlight dim 30%.
+- Touch beendet Cover Page, Backlight 100%.
+
+9. Sleep / Power
+- Soft Sleep: nach 30s ohne Touch Backlight 1%.
+- Deep Sleep: nach 5 min ohne Touch.
+- Wake via Touch-IRQ.
+
+10. WLAN & MQTT
+- WiFi: fast_connect: true, power_save_mode: none.
+- MQTT: Broker/Username/Password aus secrets.
+
+11. Grafik- und Touch-Spezifikation (240x240, Ursprung oben links)
+
+11.1 Global
+- Display: 240x240, rund; Koordinatensystem: (0,0) oben links.
+- Zentren: cx=120, cy=120.
+- Touch liefert Einzel-Events (keine Drag-Events).
+
+11.2 Music Page (ui_mode=1) – Grafik
+- Hintergrund: bg_image zentriert (240x240).
+- Lautstärkeanzeige:
+  - +/- Zeichen: x=60 und x=180, y=vol_y (=24) bzw. vol_y+2.
+  - Prozent: x=120, y=vol_y (white), Overlay groß: y=vol_y+6.
+- Batterieanzeige:
+  - Icon links: bx=18, by=24, Icon 16x10 + Pol 3x4; Text x=bx+32, y=by-2.
+- Titel:
+  - Bereich: x=20..220 (Breite 200), y=36.
+  - Marquee bei Überlänge (scroll rechts→links).
+- Interpret:
+  - x=120, y=58, Schrift fett, Farbe ui_darkgray.
+- Zeit: x=120, y=238 (Bottom Center).
+- Controls:
+  - Prev/Play/Next Zonen: visuell in y=90..150.
+  - Play/Pause Symbol in Mitte (Dreieck/Balken).
+- Playlist/Radio/Podcast Label:
+  - Linien: y=178/179 und y=210/211.
+  - Text: x=120, y=185.
+
+11.3 Music Page (ui_mode=1) – Touch-Flächen
+- Volume:
+  - Aktivzone: y < vol_zone_h (60 oder 70).
+  - Links (x < 120): volume_down, rechts: volume_up.
+- Controls:
+  - y 90..150; x < 80: prev; x < 160: play/pause; else: next.
+- Playlist Page Toggle:
+  - y > 170 → ui_mode = 2.
+
+11.4 Listen Page (ui_mode=2) – Grafik
+- Header (nur wenn scroll_px <= 1):
+  - Hintergrund: y=0..28 (ui_verydarkgray).
+  - Moduslabel: x=80, y=4; ">>" x=200, y=4.
+- Liste:
+  - list_start_y=40, row_h=30, visible_rows=6.
+  - Zeilen-Rechteck: x=10..224, Höhe 30, Highlight grün.
+- Scroll-Indikator:
+  - Arc rechts (45° oben bis 45° unten), r=112.
+  - Punkt (r=5) an Arc-Position.
+
+11.5 Listen Page (ui_mode=2) – Touch-Flächen
+- Genre Toggle:
+  - nur wenn scroll_px <= 1
+  - y < 28: list_mode = (list_mode+1) % 3
+- Scroll Up:
+  - nur wenn scroll_px > 0
+  - y in [28..list_start_y+20]
+  - scrollt 3 Einträge hoch
+- Scroll Down:
+  - y >= list_start_y + visible_h (>= 220)
+  - scrollt 3 Einträge runter
+- List Tap:
+  - y in [list_start_y+20 .. list_start_y+visible_h-20]
+  - selektiert Eintrag, startet media_player.play_media
+
+11.6 Cover Page (ui_mode=1, idle)
+- Vollflächiges Cover Image (cover_image).
+
+11.7 Idle/Assist Pages
+- Idle: Batterieboxen oben (siehe Code), Illustrationen zentriert.
+
+12. Layout / Koordinaten (Hauptwerte)
+- Liste: list_start_y=40, row_h=30, visible_rows=6.
+- Header: y=0..28; Header sichtbar nur at_top (scroll_px<=1).
+- Scroll-Down Zone: y >= list_start_y + visible_h.
+- Scroll-Up Zone: y in [header_h, list_start_y+20].
+
+12. Debug/Logging
+- Touch Logs für Scroll-Up/Down und Listentap.
+- Play Media Log mit URI, Name, Type.
+
+13. Fehlerannahmen / Grenzen
+- Touch liefert nur single-event; Scroll per Up/Down Tap.
+- Curved text entfernt; Header simpel (Text + >>).
+- MQTT Text Sensor via mqtt_subscribe (ESPHome 2026.1.3).
