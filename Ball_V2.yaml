@@ -5,6 +5,7 @@ substitutions:
   bg_image_url: "http://server.local:8123/local/ball_bg.png"
 
   # === Vorwissen: HA / Music Assistant Entities ===
+  #ha_player: "media_player.airport_express_von_christopher_airplay"          # Transport controls + Playlist playback
   ha_player: "media_player.sonos_roam_airplay"          # Transport controls + Playlist playback
   #ha_player: "media_player.kuche_2"          # Transport controls + Playlist playback
   #ha_player: "media_player.wohnzimmer_airplay"          # Transport controls + Playlist playback
